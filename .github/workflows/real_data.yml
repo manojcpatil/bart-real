@@ -1,0 +1,167 @@
+# Real-data analysis for the BART thesis (task T11), run on GitHub's machines.
+#
+# Starts by itself on the first push, and can be restarted from the Actions tab
+# ("real_data" -> "Run workflow"). Order of work:
+#   smoke           tiny settings on every dataset, so errors show up in minutes
+#   run             20 random splits per dataset and noise level, in parallel jobs
+#   pdp_california  partial dependence and residual checks for California
+#   gather          collects everything, writes the summary tables and commits
+#                   them to Application/results in this repository
+# Every job uploads its own results, so nothing is lost if a later job fails.
+
+name: real_data
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - ".github/workflows/real_data.yml"
+      - "Coding/**"
+      - "Application/analysis/**"
+      - "Application/data/**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: real-data
+  cancel-in-progress: false
+
+env:
+  R_PACKAGES: 'c("BART", "dbarts", "ranger", "xgboost")'
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - name: Install R packages
+        run: Rscript -e "install.packages(${R_PACKAGES})"
+      - name: Package versions
+        run: Rscript -e 'for (p in c("BART","dbarts","ranger","xgboost")) cat(p, as.character(packageVersion(p)), "\n"); cat("cores:", parallel::detectCores(), "\n")'
+      - name: Smoke test (tiny chains, one split, every dataset)
+        run: Rscript Application/analysis/real_data.R --smoke
+      - name: Smoke test of the partial dependence and residual script
+        run: Rscript Application/analysis/pdp_residuals.R --smoke --data energy
+
+  run:
+    needs: smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        include:
+          - { data: concrete,   noise: "0",   splits: "1:20", tag: concrete-0 }
+          - { data: concrete,   noise: "50",  splits: "1:20", tag: concrete-50 }
+          - { data: concrete,   noise: "200", splits: "1:20", tag: concrete-200 }
+          - { data: energy,     noise: "0",   splits: "1:20", tag: energy-0 }
+          - { data: energy,     noise: "50",  splits: "1:20", tag: energy-50 }
+          - { data: energy,     noise: "200", splits: "1:20", tag: energy-200 }
+          - { data: wine_red,   noise: "0",   splits: "1:20", tag: wine-0 }
+          - { data: wine_red,   noise: "50",  splits: "1:20", tag: wine-50 }
+          - { data: wine_red,   noise: "200", splits: "1:10", tag: wine-200a }
+          - { data: wine_red,   noise: "200", splits: "11:20", tag: wine-200b }
+          - { data: california, noise: "0",   splits: "1:2", tag: california-01 }
+          - { data: california, noise: "0",   splits: "3:4", tag: california-02 }
+          - { data: california, noise: "0",   splits: "5:6", tag: california-03 }
+          - { data: california, noise: "0",   splits: "7:8", tag: california-04 }
+          - { data: california, noise: "0",   splits: "9:10", tag: california-05 }
+          - { data: california, noise: "0",   splits: "11:12", tag: california-06 }
+          - { data: california, noise: "0",   splits: "13:14", tag: california-07 }
+          - { data: california, noise: "0",   splits: "15:16", tag: california-08 }
+          - { data: california, noise: "0",   splits: "17:18", tag: california-09 }
+          - { data: california, noise: "0",   splits: "19:20", tag: california-10 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - name: Install R packages
+        run: Rscript -e "install.packages(${R_PACKAGES})"
+      - name: Run ${{ matrix.data }}, noise ${{ matrix.noise }}, splits ${{ matrix.splits }}
+        run: >
+          Rscript Application/analysis/real_data.R
+          --data ${{ matrix.data }} --noise ${{ matrix.noise }}
+          --splits ${{ matrix.splits }} --workers $(nproc)
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-${{ matrix.tag }}
+          path: Application/results/raw/*.rds
+          if-no-files-found: warn
+
+  pdp_california:
+    needs: smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - name: Install R packages
+        run: Rscript -e "install.packages(${R_PACKAGES})"
+      - name: Partial dependence and residual checks, California
+        run: Rscript Application/analysis/pdp_residuals.R --data california
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdp-california
+          path: |
+            Application/results/pdp_california.csv
+            Application/results/residual_checks.csv
+            Application/results/coverage_by_decile.csv
+            Application/Thesis_LaTeX/figures/*.pdf
+          if-no-files-found: warn
+
+  gather:
+    needs: [smoke, run, pdp_california]
+    if: always() && needs.smoke.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - name: Download split results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: raw-*
+          merge-multiple: true
+          path: Application/results/raw
+      - name: Download California partial dependence results
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: pdp-california
+          path: Application
+      - name: Summary tables
+        run: |
+          ls Application/results/raw | wc -l
+          Rscript Application/analysis/real_data.R --gather
+      - name: Upload everything as one download
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-data-results
+          path: |
+            Application/results
+            Application/Thesis_LaTeX/figures
+          if-no-files-found: warn
+      - name: Commit results to the repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898+github-actions[bot]@users.noreply.github.com"
+          git add -f Application/results
+          if [ -d Application/Thesis_LaTeX/figures ]; then git add -f Application/Thesis_LaTeX/figures; fi
+          git commit -m "Real-data results from workflow run ${{ github.run_id }}" || echo "nothing to commit"
+          git push

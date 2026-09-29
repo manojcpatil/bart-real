@@ -1,0 +1,2 @@
+"dataset","n","oof_rmse","sigma_post","oof_coverage","coverage_min_decile","coverage_max_decile","spearman_absres_fitted","spearman_p","sd_ratio_top_bottom","skewness","excess_kurtosis","top_variables","minutes"
+"california",20640,0.500360673285113,0.473447846954757,0.939970930232558,0.847383720930233,0.992732558139535,0.349346550603359,0,2.7294356030869,1.14488868576421,5.79493279409118,"latitude;longitude;median_income;population",37.99115
